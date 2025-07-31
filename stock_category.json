@@ -1,0 +1,8 @@
+{
+  "seed": ["seed_stock", "Seeds 🌱"],
+  "gear": ["gear_stock", "Gears ⚙️"],
+  "cosmetic": ["cosmetic_stock", "Cosmetics 🧼"],
+  "eventshop": ["eventshop_stock", "Event Stock 🎉"],
+  "egg": ["egg_stock", "Eggs 🥚"],
+  "announcement": ["announcement", "Announcement 📢"]
+}

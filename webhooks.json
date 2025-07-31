@@ -1,0 +1,29 @@
+{
+  "1396440270517702696": {
+    "seed": {
+      "id": "1400476472363450398",
+      "token": "QqZoLHXl2rToeh8XxVTAEBjVpWS4QnBLzftf2XYf_ARYP40vz3KjAAme0lhl8PsQKEmb",
+      "channelId": "1396440270949711944"
+    },
+    "gear": {
+      "id": "1400476519255773316",
+      "token": "-5mIeC5gaTF6xyzLDonECd0IIWlFeFDxvxHzSc10Er_qP_Wxon7xkqnmQvR-pdnVBqZc",
+      "channelId": "1400066902629286060"
+    },
+    "weather": {
+      "id": "1400476575006195775",
+      "token": "SEUSHwhsp-f5WqvgRfVaREolJSDFB_HuKRWJEEw8MmyD4OBt6DWCdBQaDibgx6Qnarji",
+      "channelId": "1400066941229465672"
+    },
+    "egg": {
+      "id": "1400476627065897081",
+      "token": "jBR3mZlGSXb21NCndpQEGB055z5F8hpwcNMDBxp3PkMLiewb7mHhu7rXQ08g-XQF7JMn",
+      "channelId": "1400066919066894396"
+    },
+    "eventshop": {
+      "id": "1400476695349432541",
+      "token": "L1P7JS7JbKkTPNZ8nZkxo8a0fpjnNt540wf8WExZPNdTGGoDtXaEWu3cKTWi47ZhFyqt",
+      "channelId": "1400066966919712809"
+    }
+  }
+}

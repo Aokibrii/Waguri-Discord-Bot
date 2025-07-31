@@ -1,0 +1,17 @@
+{
+  "name": "gag-bot",
+  "version": "1.0.0",
+  "description": "Discord bot with stock, weather, and role management",
+  "main": "index.js",
+  "type": "module",
+  "engines": {
+    "node": ">=16"
+  },
+  "scripts": {
+    "start": "node ."
+  },
+  "dependencies": {
+    "discord.js": "^14.21.0",
+    "node-fetch": "^3.3.2"
+  }
+}

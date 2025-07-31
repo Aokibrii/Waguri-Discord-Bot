@@ -1,0 +1,9 @@
+{
+  "seed": "seed_restock",
+  "gear": "gear_restock",
+  "cosmetic": "cosmetic_restock",
+  "egg": "egg_restock",
+  "eventshop": "event_restock",
+  "weather": "weather_change",
+  "announcement": "jandel_message"
+}

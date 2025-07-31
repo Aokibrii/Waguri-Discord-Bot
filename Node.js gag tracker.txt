@@ -1,0 +1,911 @@
+import { readFileSync, writeFileSync } from 'fs';
+import { URLSearchParams } from 'url';
+import { setTimeout as wait } from 'timers/promises';
+import os from 'os';
+import {
+  Client,
+  Events,
+  GatewayIntentBits,
+  Partials,
+  EmbedBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ActionRowBuilder,
+  StringSelectMenuBuilder,
+  ChannelSelectMenuBuilder,
+  ChannelType,
+  Colors,
+  PermissionFlagsBits,
+  ApplicationCommandType,
+  ActivityType,
+  WebhookClient,
+  version as djsVersion
+} from 'discord.js';
+import fetch from 'node-fetch';
+
+// — Constants & Config —
+const EPHEMERAL = 1 << 6;
+const PREFIX = '!';
+const ITEMS_PER_PAGE = 10;
+const WEBHOOK_AVATAR = 'https://iili.io/FecQZml.md.webp';
+const EMBED_IMAGE_URL = 'https://i.postimg.cc/G485VPvY/IMG-1273.png';
+
+// URL for dynamic weather icons
+const WEATHER_IMAGE_API_URL = 'https://api.joshlei.com/v2/growagarden/image';
+
+// — JSON Helpers —
+function loadJSON(path, def = {}) {
+  try { return JSON.parse(readFileSync(path, 'utf-8')); }
+  catch { return def; }
+}
+function saveJSON(path, data) {
+  try { writeFileSync(path, JSON.stringify(data, null, 2), 'utf-8'); }
+  catch {}
+}
+
+// — Load Config & Data —
+const cfg = loadJSON('./config.json');
+const {
+  DISCORD_BOT_TOKEN,
+  STOCK_API_URL,
+  WEATHER_API_URL,
+  CALCULATE_API_URL,
+  INFO_API_URL,
+  CURRENT_EVENT_API_URL = 'https://api.joshlei.com/v2/growagarden/currentevent',
+  INVITE_URL,
+  EMOJI_MAPPING_FILE,
+  ROLE_CONFIG_FILE,
+  STOCK_CATEGORY_FILE,
+  COLOR_MAPPING_FILE,
+  THUMBNAILS_FILE,
+  CATEGORY_ROLE_FILE,
+  ROLE_OP_DELAY = 1.0,
+  MAX_ROLE_RETRIES = 3
+} = cfg;
+
+const ITEM_ROLES        = loadJSON('./item_roles.json', []);
+const EMOJI_MAP_RAW     = loadJSON(EMOJI_MAPPING_FILE, {});
+const ROLE_CONFIG       = loadJSON(ROLE_CONFIG_FILE, {});
+const STOCK_CATEGORY    = loadJSON(STOCK_CATEGORY_FILE, {});
+const COLOR_MAPPING_RAW = loadJSON(COLOR_MAPPING_FILE, {});
+const THUMBNAILS        = loadJSON(THUMBNAILS_FILE, {});
+const CATEGORY_ROLE_MAP = loadJSON(CATEGORY_ROLE_FILE, {});
+
+const CHANNELS_FILE   = 'channels.json';
+const ROLES_FILE      = 'roles.json';
+const LAST_STATE_FILE = 'last_state.json';
+const WEBHOOKS_FILE   = 'webhooks.json';
+let channelsData = loadJSON(CHANNELS_FILE, {});
+let rolesData    = loadJSON(ROLES_FILE, {});
+let lastState    = loadJSON(LAST_STATE_FILE, {});
+let webhooksData = loadJSON(WEBHOOKS_FILE, {});
+
+function saveAll() {
+  saveJSON(CHANNELS_FILE, channelsData);
+  saveJSON(ROLES_FILE, rolesData);
+  saveJSON(LAST_STATE_FILE, lastState);
+  saveJSON(WEBHOOKS_FILE, webhooksData);
+}
+
+// — Discord Client —
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMembers
+  ],
+  partials: [ Partials.Channel ]
+});
+let isChecking = false;
+
+// — Utilities —
+function normalizeKey(str) {
+  return str.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/(^_|_$)/g, '');
+}
+const EMOJI_MAPPING = Object.fromEntries(
+  Object.entries(EMOJI_MAP_RAW).map(([rawName, emoji]) => {
+    const key = normalizeKey(rawName.trim());
+    return [key, emoji];
+  })
+);
+function getEmojiByKey(key) {
+  return EMOJI_MAPPING[key] || '';
+}
+
+const COLOR_MAPPING = {};
+for (const [k,v] of Object.entries(COLOR_MAPPING_RAW)) {
+  if (typeof v === 'string')       COLOR_MAPPING[k] = parseInt(v.replace('#',''), 16);
+  else if (v?.r != null)           COLOR_MAPPING[k] = (v.r<<16)|(v.g<<8)|v.b;
+  else if (typeof v === 'number')  COLOR_MAPPING[k] = v;
+  else                              COLOR_MAPPING[k] = Colors.White;
+}
+
+function logCommand(name, start) {
+  console.log(`[${new Date().toISOString()}] ${name} responded in ${Date.now() - start}ms`);
+}
+
+function createInviteView() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setLabel('Invite Bot').setURL(INVITE_URL).setStyle(ButtonStyle.Link)
+  );
+}
+
+function relativeTimestampField() {
+  const now = Math.floor(Date.now() / 1000);
+  return { name: '\u200b', value: `<t:${now}:R>\n<t:${now}:f>`, inline: false };
+}
+
+// — Embed Creators —
+function createStockEmbed(items, title) {
+  const lines = items.map(i => {
+    const txt = (i.quantity>1) ? `${i.display_name} x${i.quantity}` : i.display_name;
+    const emoji = getEmojiByKey(normalizeKey(i.display_name.trim()));
+    return emoji ? `${emoji} ${txt}` : txt;
+  }).join('\n');
+  return new EmbedBuilder()
+    .setTitle(`🛒 ${title}`)
+    .setDescription(lines)
+    .setColor(COLOR_MAPPING[title]||Colors.White)
+    .setThumbnail(THUMBNAILS[title]||null)
+    .addFields(relativeTimestampField())
+    .setImage(EMBED_IMAGE_URL);
+}
+
+function createEggEmbed(items, title) {
+  const counts = items.reduce((a,i)=>(a[i.display_name]=(a[i.display_name]||0)+(i.quantity||1),a), {});
+  const lines = Object.entries(counts).map(([n,q])=> {
+    const txt = (q>1)?`${n} x${q}`:n;
+    const emoji = getEmojiByKey(normalizeKey(n.trim()));
+    return emoji?`${emoji} ${txt}`:txt;
+  }).join('\n');
+  return new EmbedBuilder()
+    .setTitle(`🥚 ${title}`)
+    .setDescription(lines)
+    .setColor(COLOR_MAPPING[title]||Colors.White)
+    .setThumbnail(THUMBNAILS[title]||null)
+    .addFields(relativeTimestampField())
+    .setImage(EMBED_IMAGE_URL);
+}
+
+function createAnnouncementEmbed(note) {
+  return new EmbedBuilder()
+    .setTitle('📢 Announcement')
+    .setDescription(note.message || '')
+    .setColor(COLOR_MAPPING['Announcement 📢']||Colors.Blue)
+    .setThumbnail(THUMBNAILS['Announcement 📢']||null)
+    .addFields(relativeTimestampField())
+    .setImage(EMBED_IMAGE_URL);
+}
+
+function createWeatherEmbed(w, desc) {
+  const key = normalizeKey(w.weather_name.trim());
+  const emoji = getEmojiByKey(key);
+  const nowTs = Math.floor(Date.now() / 1000);
+  const endTs = (w.start_duration_unix || nowTs) + w.duration;
+  return new EmbedBuilder()
+    .setTitle(`${emoji} ${w.weather_name}`)
+    .setDescription(`Status: Active\n${desc}`)
+    .setColor(COLOR_MAPPING.Weather || Colors.Blue)
+    .setThumbnail(`${WEATHER_IMAGE_API_URL}/${encodeURIComponent(w.weather_id)}`)
+    .addFields(
+      { name: '\u200b', value: `<t:${nowTs}:R>\n<t:${nowTs}:f>`, inline: false },
+      { name: 'Duration', value: `ends <t:${endTs}:R>`, inline: false }
+    )
+    .setImage(EMBED_IMAGE_URL);
+}
+
+function createCurrentEventEmbed(curr) {
+  const now = new Date();
+  let d = new Date(now);
+  d.setSeconds(0, 0);
+  d.setMinutes(curr.start.minute);
+  if (d < now) d.setHours(d.getHours() + 1);
+  const unix = Math.floor(d.getTime() / 1000);
+  return new EmbedBuilder()
+    .setTitle(`🌟 Event: ${curr.name}`)
+    .setDescription(`**Starts:** <t:${unix}:R>`)
+    .setColor(Colors.Gold)
+    .setThumbnail(curr.icon || EMBED_IMAGE_URL)
+    .addFields(relativeTimestampField())
+    .setImage(EMBED_IMAGE_URL);
+}
+
+// — Fetch Helpers —
+async function fetchJson(url, params=null, retries=3) {
+  for (let i=0; i<retries; i++) {
+    try {
+      const headers = { 'Jstudio-key':'KEY HERE' };
+      const opts = { method: params?'POST':'GET', headers };
+      if (params) { headers['Content-Type']='application/json'; opts.body = JSON.stringify(params); }
+      const res = await fetch(url, opts);
+      if (!res.ok) return null;
+      return await res.json();
+    } catch {
+      if (i < retries-1) await wait(2000*(i+1));
+    }
+  }
+  return null;
+}
+
+const fetchStockData   = () => fetchJson(STOCK_API_URL);
+const fetchWeatherData = () => fetchJson(WEATHER_API_URL);
+const fetchInfoData    = () => fetchJson(INFO_API_URL);
+const fetchEventData   = () => fetchJson(CURRENT_EVENT_API_URL);
+async function fetchCalculate(params) {
+  try {
+    const qs = new URLSearchParams();
+    if (params.Name)    qs.set('Name', params.Name);
+    if (params.Weight!=null) qs.set('Weight', params.Weight);
+    if (params.Variant) qs.set('Variant', params.Variant);
+    if (params.Mutation)qs.set('Mutation', params.Mutation);
+    const res = await fetch(CALCULATE_API_URL + (qs.toString()?`?${qs}`:''), { headers:{ 'JStudio-key':'KEY HERE' }});
+    if (!res.ok) return null;
+    return await res.json();
+  } catch { return null; }
+}
+
+// — Role Creation Retry —
+async function createRoleWithRetry(guild, { name, color, skipDelay=false }) {
+  for (let attempt=1; attempt<=MAX_ROLE_RETRIES; attempt++) {
+    try {
+      if (!skipDelay) await wait(ROLE_OP_DELAY*1000*(Math.random()+0.5));
+      const resolved = typeof color==='string'
+        ? parseInt(color.replace('#',''),16)
+        : color?.r != null
+          ? (color.r<<16)|(color.g<<8)|color.b
+          : typeof color==='number'
+            ? color
+            : Colors.Blurple;
+      return await guild.roles.create({ name, color:resolved, mentionable:true, reason:'Setup' });
+    } catch(err) {
+      if (err.code===50035 && attempt<MAX_ROLE_RETRIES) {
+        await wait((2**attempt)*1000 + Math.random()*1000);
+      }
+    }
+  }
+  return null;
+}
+
+// — Channel setup mapping —
+const CHANNEL_TYPES = {
+  setseed:        'seed_channel_id',
+  setgear:        'gear_channel_id',
+  setcosmetic:    'cosmetic_channel_id',
+  seteventstock:  'eventshop_channel_id',
+  setegg:         'egg_channel_id',
+  setannounce:    'announcement_channel_id',
+  setweather:     'weather_channel_id',
+  setmerchant:    'merchant_channel_id',
+  setcurrentevent:'current_event_channel_id'
+};
+
+// — Role panel paging —
+const rolePanelPages = {};
+
+// — MessageCreate: prefix commands —
+client.on(Events.MessageCreate, async msg => {
+  if (msg.author.bot) return;
+  const lc = msg.content.trim().toLowerCase();
+
+  // — Manual push for Current Event —
+  if (lc === `${PREFIX}setcurrentevent`) {
+    if (!msg.member.permissions.has(PermissionFlagsBits.Administrator)) {
+      return msg.reply({ content: '🚫 Admin only.', flags: EPHEMERAL });
+    }
+    const ev = await fetchEventData();
+    if (!ev?.current) {
+      return msg.reply({ content: '❌ Could not fetch current event.' });
+    }
+    const embed = createCurrentEventEmbed(ev.current);
+    await msg.channel.send({
+      embeds: [ embed ],
+      components: [ createInviteView() ]
+    });
+    lastState.currentEvent = JSON.stringify(ev.current);
+    saveAll();
+    return;
+  }
+
+  // — Improved !stats command —
+  if (lc === `${PREFIX}stats`) {
+    const start = Date.now();
+    const mem = process.memoryUsage();
+    const cpu = process.cpuUsage();
+    const uptimeSec = Math.floor(process.uptime());
+    const hours   = Math.floor(uptimeSec / 3600);
+    const minutes = Math.floor((uptimeSec % 3600) / 60);
+    const seconds = uptimeSec % 60;
+
+    const embed = new EmbedBuilder()
+      .setTitle('🔧 Bot Statistics')
+      .setColor(Colors.Blurple)
+      .addFields(
+        {
+          name: '🧠 Memory Usage',
+          value: `RSS: ${(mem.rss/1024/1024).toFixed(2)} MB\nHeap: ${(mem.heapUsed/1024/1024).toFixed(2)} / ${(mem.heapTotal/1024/1024).toFixed(2)} MB`,
+          inline: true
+        },
+        {
+          name: '💾 CPU Usage',
+          value: `User: ${(cpu.user/1000).toFixed(2)} ms\nSystem: ${(cpu.system/1000).toFixed(2)} ms`,
+          inline: true
+        },
+        {
+          name: '⏱️ Uptime',
+          value: `${hours}h ${minutes}m ${seconds}s`,
+          inline: true
+        },
+        {
+          name: '📶 WS Ping',
+          value: `${Math.round(client.ws.ping)} ms`,
+          inline: true
+        },
+        {
+          name: '📍 Platform',
+          value: `${os.type()} ${os.platform()} ${os.arch()}`,
+          inline: true
+        },
+        {
+          name: '🤖 Servers',
+          value: `${client.guilds.cache.size}`,
+          inline: true
+        },
+        {
+          name: '⚙️ Versions',
+          value: `Node.js ${process.version}\ndiscord.js ${djsVersion}`,
+          inline: true
+        }
+      )
+      .setTimestamp();
+
+    await msg.reply({ embeds: [embed] });
+    logCommand('!stats', start);
+    return;
+  }
+
+  if (lc === `${PREFIX}ping`) {
+    const start = Date.now();
+    await msg.reply(`🏓 Pong! WS ping: ${Math.round(client.ws.ping)}ms`);
+    logCommand('!ping', start);
+    return;
+  }
+
+  if (lc === `${PREFIX}rolepanel`) {
+    if (!msg.member.permissions.has(PermissionFlagsBits.Administrator))
+      return msg.reply({ content:'🚫 Admin only.', flags:EPHEMERAL });
+    await msg.channel.send({
+      embeds:[ new EmbedBuilder().setTitle('🎉 Role Panel').setDescription('Click “Get Role”').setColor(Colors.Blurple) ],
+      components:[ new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('open_role_panel').setLabel('Get Role').setStyle(ButtonStyle.Primary)
+      )]
+    });
+    return;
+  }
+
+  if (msg.content.startsWith(PREFIX)) {
+    const [cmd] = msg.content.slice(PREFIX.length).split(/\s+/);
+    const type = CHANNEL_TYPES[cmd.toLowerCase()];
+    if (type) {
+      if (!msg.member.permissions.has(PermissionFlagsBits.Administrator))
+        return msg.reply({ content:'🚫 Admin only.', flags:EPHEMERAL });
+      channelsData[msg.guild.id] = channelsData[msg.guild.id]||{};
+      channelsData[msg.guild.id][type] = msg.channel.id;
+      saveAll();
+      const r = await msg.reply(`✅ Channel set to <#${msg.channel.id}>`);
+      setTimeout(() => r.delete().catch(()=>{}), 5000);
+      await checkAll();
+    }
+  }
+});
+
+// — Main checkAll() (no current-event) —
+async function checkAll() {
+  if (isChecking) return;
+  isChecking = true;
+  try {
+    const [stockAll, wd, infoData] = await Promise.all([
+      fetchStockData(), fetchWeatherData(), fetchInfoData()
+    ]);
+
+    // — Stock & Announcement notifications —
+    if (stockAll) {
+      const nowTs = Math.floor(Date.now()/1000);
+
+      for (const [key, [apiKey, title]] of Object.entries(STOCK_CATEGORY)) {
+        const items = stockAll[apiKey] || [];
+        const json  = JSON.stringify(items);
+        if (json === lastState[apiKey]) continue;
+        lastState[apiKey] = json;
+        if (!items.length) continue;
+
+        // skip if expired (for stock types)
+        if (key !== 'announcement') {
+          const et = Math.max(...items.map(i => i.end_date_unix || 0));
+          if (et < nowTs) continue;
+        }
+
+        // choose embed
+        let embed;
+        if (key === 'egg') {
+          embed = createEggEmbed(items, title);
+        } else if (key === 'announcement') {
+          embed = createAnnouncementEmbed(items[0]);
+        } else {
+          embed = createStockEmbed(items, title);
+        }
+
+        for (const [gId, chs] of Object.entries(channelsData)) {
+          const channelId = chs[`${key}_channel_id`];
+          const ch        = client.channels.cache.get(channelId);
+          if (!ch) continue;
+
+          // category role ping
+          const pings = [];
+          if (rolesData[gId]?.[key]) {
+            pings.push(`<@&${rolesData[gId][key]}>`);
+          }
+          // item-specific role pings
+          for (const item of items) {
+            const iKey = normalizeKey(item.display_name.trim());
+            if (rolesData[gId]?.[iKey]) {
+              pings.push(`<@&${rolesData[gId][iKey]}>`);
+            }
+          }
+
+          const content = pings.length ? pings.join(' ') : undefined;
+          const hook    = webhooksData[gId]?.[key];
+          const payload = {
+            content,
+            embeds:     [embed],
+            components: [createInviteView()],
+            username:   client.user.username,
+            avatarURL:  WEBHOOK_AVATAR,
+            allowedMentions: { parse: ['roles'] }
+          };
+
+          if (hook) {
+            await new WebhookClient(hook).send(payload);
+          } else {
+            await ch.send(payload);
+          }
+        }
+      }
+    }
+
+    // — Weather —
+    if (wd?.weather) {
+      const active = wd.weather.filter(w=>w.active);
+      const json = JSON.stringify(active);
+      if (json !== lastState.weather) {
+        lastState.weather = json;
+        const nowTs = Math.floor(Date.now()/1000);
+        for (const w of active) {
+          const et = w.end_duration_unix || (w.start_duration_unix + w.duration);
+          if (et < nowTs) continue;
+          const desc = infoData.find(i=>i.item_id===w.weather_id)?.description||'No description';
+          const eb = createWeatherEmbed(w, desc);
+
+          for (const [gId, chs] of Object.entries(channelsData)) {
+            const ch = client.channels.cache.get(chs.weather_channel_id);
+            if (!ch) continue;
+
+            const pings = [];
+            if (rolesData[gId]?.weather) pings.push(`<@&${rolesData[gId].weather}>`);
+            const wid = normalizeKey(w.weather_name.trim());
+            if (rolesData[gId]?.[wid]) pings.push(`<@&${rolesData[gId][wid]}>`);
+            const content = pings.join(' ') || undefined;
+            const hook    = webhooksData[gId]?.weather;
+            const payload = {
+              content,
+              embeds:     [eb],
+              components: [createInviteView()],
+              username:   client.user.username,
+              avatarURL:  WEBHOOK_AVATAR,
+              allowedMentions: { parse: ['roles'] }
+            };
+
+            if (hook) {
+              await new WebhookClient(hook).send(payload);
+            } else {
+              await ch.send(payload);
+            }
+          }
+        }
+      }
+    }
+
+    // — Traveling Merchant —
+    if (stockAll?.travelingmerchant_stock?.stock.length) {
+      const tm   = stockAll.travelingmerchant_stock;
+      const json = JSON.stringify(tm);
+      if (json !== lastState.tm) {
+        lastState.tm = json;
+        const nowTs = Math.floor(Date.now()/1000);
+        const items = tm.stock;
+        const et    = Math.max(...items.map(i=>i.end_date_unix||0));
+        if (et >= nowTs) {
+          const eb = createMerchantEmbed(tm.merchantName, items);
+
+          for (const [gId, chs] of Object.entries(channelsData)) {
+            const ch = client.channels.cache.get(chs.merchant_channel_id);
+            if (!ch) continue;
+
+            const pings = [];
+            if (rolesData[gId]?.jandel) pings.push(`<@&${rolesData[gId].jandel}>`);
+            for (const item of items) {
+              const iKey = normalizeKey(item.display_name.trim());
+              if (rolesData[gId]?.[iKey]) {
+                pings.push(`<@&${rolesData[gId][iKey]}>`);
+              }
+            }
+
+            const content = pings.length ? pings.join(' ') : undefined;
+            const hook    = webhooksData[gId]?.jandel;
+            const payload = {
+              content,
+              embeds:     [eb],
+              components: [createInviteView()],
+              username:   client.user.username,
+              avatarURL:  WEBHOOK_AVATAR,
+              allowedMentions: { parse: ['roles'] }
+            };
+
+            if (hook) {
+              await new WebhookClient(hook).send(payload);
+            } else {
+              await ch.send(payload);
+            }
+          }
+        }
+      }
+    }
+
+    saveAll();
+  } catch(err) {
+    console.error('checkAll error:', err);
+  } finally {
+    isChecking = false;
+  }
+}
+
+// — Current Event Scheduler —
+let nextEventTs = null;
+
+async function checkCurrentEvent() {
+  const nowTs = Math.floor(Date.now() / 1000);
+
+  if (nextEventTs === null) {
+    const ev = await fetchEventData();
+    if (ev?.current) {
+      const now = new Date();
+      let d   = new Date(now);
+      d.setSeconds(0, 0);
+      d.setMinutes(ev.current.start.minute);
+      if (d < now) d.setHours(d.getHours() + 1);
+      nextEventTs = Math.floor(d.getTime() / 1000);
+    }
+    return;
+  }
+
+  if (nowTs >= nextEventTs) {
+    const ev = await fetchEventData();
+    if (ev?.current) {
+      const embed = createCurrentEventEmbed(ev.current);
+      for (const [gId, chs] of Object.entries(channelsData)) {
+        const ch = client.channels.cache.get(chs.current_event_channel_id);
+        if (!ch) continue;
+        const hook = webhooksData[gId]?.currentevent;
+        const payload = {
+          embeds:     [embed],
+          components: [createInviteView()],
+          username:   client.user.username,
+          avatarURL:  WEBHOOK_AVATAR,
+          allowedMentions: { parse: ['roles'] }
+        };
+        if (hook) {
+          await new WebhookClient(hook).send(payload);
+        } else {
+          await ch.send(payload);
+        }
+      }
+      const now = new Date();
+      let d   = new Date(now);
+      d.setSeconds(0, 0);
+      d.setMinutes(ev.current.start.minute);
+      if (d < now) d.setHours(d.getHours() + 1);
+      nextEventTs = Math.floor(d.getTime() / 1000);
+    }
+  }
+}
+
+// — Interaction Handler —
+async function interactionHandler(i) {
+  try {
+    if (i.isChatInputCommand()) {
+      const start = Date.now(), guild = i.guild;
+      if (!guild) return i.reply({ content:'💥 Must be in a guild.', flags:EPHEMERAL });
+
+      // /setup-roles
+      if (i.commandName==='setup-roles') {
+        if (!i.member.permissions.has(PermissionFlagsBits.Administrator))
+          return i.reply({ content:'🚫 Admin only.', flags:EPHEMERAL });
+        await i.deferReply({ flags:EPHEMERAL });
+        const gid = guild.id;
+        rolesData[gid] = rolesData[gid]||{};
+        const createdN = [], existedN = [];
+        for (const [key,name] of Object.entries(ROLE_CONFIG)) {
+          const dn = typeof name==='object'&&name.name?name.name:name;
+          if (rolesData[gid][key]) existedN.push(dn);
+          else {
+            const r = await createRoleWithRetry(guild,{ name:dn, color:Colors.Blurple });
+            if (r) { rolesData[gid][key]=r.id; createdN.push(dn); }
+          }
+        }
+        const createdI = [], existedI = [];
+        for (const item of ITEM_ROLES) {
+          const key = normalizeKey(item.trim());
+          if (rolesData[gid][key]) existedI.push(item);
+          else {
+            const r = await createRoleWithRetry(guild,{ name:item, color:Colors.Green });
+            if (r) { rolesData[gid][key]=r.id; createdI.push(item); }
+          }
+        }
+        saveAll();
+        const em = new EmbedBuilder().setTitle('Setup Roles').setColor(Colors.Green);
+        if (createdN.length) em.addFields({ name:'✅ Notification Roles Created', value:createdN.join('\n') });
+        if (existedN.length) em.addFields({ name:'ℹ️ Notification Roles Already Existed', value:existedN.join('\n') });
+        if (createdI.length) em.addFields({ name:'✅ Item Roles Created', value:createdI.join('\n') });
+        if (existedI.length) em.addFields({ name:'ℹ️ Item Roles Already Existed', value:existedI.join('\n') });
+        if (!createdN.length && !existedN.length && !createdI.length && !existedI.length)
+          em.setDescription('⚠️ No roles to create.');
+        await i.editReply({ embeds:[em] });
+        logCommand('/setup-roles', start);
+        return;
+      }
+
+      // /guilds
+      if (i.commandName==='guilds') {
+        await i.reply({ content:`🤖 I'm in ${client.guilds.cache.size} servers!`, flags:EPHEMERAL });
+        logCommand('/guilds', start);
+        return;
+      }
+
+      // /calculate
+      if (i.commandName==='calculate') {
+        const params = {};
+        if (i.options.get('name'))     params.Name     = i.options.getString('name');
+        if (i.options.get('weight'))   params.Weight   = i.options.getNumber('weight');
+        if (i.options.get('variant'))  params.Variant  = i.options.getString('variant');
+        if (i.options.get('mutation')) params.Mutation = i.options.getString('mutation');
+        await i.deferReply();
+        const res = await fetchCalculate(params);
+        const fruit = params.Name || 'Fruit';
+        const fKey = normalizeKey(fruit.trim());
+        const fEmoji = getEmojiByKey(fKey) || '';
+        const em = new EmbedBuilder().setTitle(`${fEmoji} ${fruit}`).setColor(Colors.Gold);
+        if (res && typeof res==='object') {
+          em.addFields(
+            { name:'Name',     value: params.Name||'N/A', inline:true },
+            { name:'⚖️ Weight',value: `${params.Weight||0} kg`, inline:true },
+            { name:'✨ Variant',value: res.Variant||'N/A', inline:true },
+            { name:'🦠 Mutation',value: res.Mutation||'N/A', inline:true },
+            { name:'🪙 Value',  value: res.value!=null?res.value.toLocaleString():'N/A', inline:true }
+          );
+        } else {
+          em.setDescription('❌ Calculation failed.');
+        }
+        await i.editReply({ embeds:[em] });
+        logCommand('/calculate', start);
+        return;
+      }
+
+      // /setup-webhook
+      if (i.commandName==='setup-webhook') {
+        if (!i.member.permissions.has(PermissionFlagsBits.Administrator))
+          return i.reply({ content:'🚫 Admin only.', flags:EPHEMERAL });
+        await i.deferReply({ flags:EPHEMERAL });
+        const em = new EmbedBuilder()
+          .setTitle('Channel Configuration')
+          .setColor(Colors.Blurple)
+          .addFields(
+            { name:'Seed Stock',            value:webhooksData[i.guild.id]?.seed       ?'✅ Set':'❌ Not Set', inline:true },
+            { name:'Gear Stock',            value:webhooksData[i.guild.id]?.gear       ?'✅ Set':'❌ Not Set', inline:true },
+            { name:'Cosmetic Stock',        value:webhooksData[i.guild.id]?.cosmetic   ?'✅ Set':'❌ Not Set', inline:true },
+            { name:'Egg Stock',             value:webhooksData[i.guild.id]?.egg        ?'✅ Set':'❌ Not Set', inline:true },
+            { name:'Event Shop',            value:webhooksData[i.guild.id]?.eventshop  ?'✅ Set':'❌ Not Set', inline:true },
+            { name:'Announcement',          value:webhooksData[i.guild.id]?.announcement? '✅ Set':'❌ Not Set', inline:true },
+            { name:'Weather Change',        value:webhooksData[i.guild.id]?.weather    ?'✅ Set':'❌ Not Set', inline:true },
+            { name:'Merchant Notification', value:webhooksData[i.guild.id]?.jandel     ?'✅ Set':'❌ Not Set', inline:true }
+          );
+        const row1 = new ActionRowBuilder().addComponents(
+          ['seed','gear','cosmetic','eventshop','egg'].map(type =>
+            new ButtonBuilder().setCustomId(`setup_webhook:${type}`).setLabel(type.charAt(0).toUpperCase()+type.slice(1)).setStyle(ButtonStyle.Primary)
+          )
+        );
+        const row2 = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('setup_webhook:announcement').setLabel('Announcement').setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId('setup_webhook:weather').setLabel('Weather').setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId('setup_webhook:jandel').setLabel('Merchant').setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId('remove_all_webhooks').setLabel('Remove All').setStyle(ButtonStyle.Danger)
+        );
+        await i.editReply({ embeds:[em], components:[row1,row2] });
+        logCommand('/setup-webhook', start);
+        return;
+      }
+    }
+
+    // — Button & Menu Handlers — (unchanged)
+    if (i.isButton() && i.customId.startsWith('setup_webhook:')) {
+      const [,type] = i.customId.split(':');
+      const menu = new ChannelSelectMenuBuilder()
+        .setCustomId(`select_webhook_channel:${type}`)
+        .setPlaceholder(`Select a text channel for ${type}…`)
+        .addChannelTypes(ChannelType.GuildText)
+        .setMinValues(1)
+        .setMaxValues(1);
+      await i.update({ content:`📡 Which channel for **${type}**?`, embeds:[], components:[ new ActionRowBuilder().addComponents(menu) ], ephemeral:true });
+      return;
+    }
+    if (i.isChannelSelectMenu() && i.customId.startsWith('select_webhook_channel:')) {
+      const [,type] = i.customId.split(':');
+      const channelId = i.values[0];
+      const channel = i.guild.channels.cache.get(channelId);
+      if (!channel?.isTextBased()) {
+        return i.update({ content:'❌ Please select a text channel.', components:[], ephemeral:true });
+      }
+      const labels = {
+        seed:'Seed Stock', gear:'Gear Stock', cosmetic:'Cosmetic Stock',
+        eventshop:'Event Shop', egg:'Egg Stock',
+        announcement:'Announcement', weather:'Weather Change', jandel:'Merchant Notification'
+      };
+      let hook;
+      try {
+        hook = await channel.createWebhook({ name:labels[type], avatar:WEBHOOK_AVATAR, reason:'Via /setup-webhook' });
+      } catch {
+        return i.update({ content:'❌ Failed to create webhook. Check permissions.', components:[], ephemeral:true });
+      }
+      webhooksData[i.guild.id] = webhooksData[i.guild.id]||{};
+      webhooksData[i.guild.id][type] = { id:hook.id, token:hook.token, channelId };
+      saveAll();
+      await i.update({ content:`✅ Webhook for **${labels[type]}** created in <#${channelId}>.`, components:[], ephemeral:true });
+      await checkAll();
+      return;
+    }
+    if (i.isButton() && i.customId==='remove_all_webhooks') {
+      delete webhooksData[i.guild.id];
+      saveAll();
+      await i.update({ content:'🗑️ All webhook settings removed.', components:[], ephemeral:true });
+      await checkAll();
+      return;
+    }
+    if (i.isButton() && i.customId==='open_role_panel') {
+      const userId = i.user.id;
+      rolePanelPages[userId] = 0;
+      const slice = ITEM_ROLES.slice(0, ITEMS_PER_PAGE);
+      const menu = new StringSelectMenuBuilder()
+        .setCustomId('select_roles')
+        .setPlaceholder('Choose your roles…')
+        .setMinValues(0)
+        .setMaxValues(slice.length)
+        .addOptions(slice.map(name => {
+          const key = normalizeKey(name.trim());
+          const raw = getEmojiByKey(key);
+          let emoji;
+          if (raw) {
+            const m = raw.match(/^<a?:(\w+):(\d+)>$/);
+            if (m) emoji = { name:m[1], id:m[2], animated:raw.startsWith('<a:') };
+            else emoji = { name:raw };
+          }
+          return { label:name, value:key, emoji };
+        }));
+      const row1 = new ActionRowBuilder().addComponents(menu);
+      const row2 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('role_prev').setLabel('⬅️ Prev').setDisabled(true).setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('role_next').setLabel('Next ➡️').setDisabled(slice.length<ITEMS_PER_PAGE).setStyle(ButtonStyle.Secondary)
+      );
+      await i.reply({ embeds:[ new EmbedBuilder().setTitle('🎨 Pick Item Roles').setDescription(`Page 1 of ${Math.ceil(ITEM_ROLES.length/ITEMS_PER_PAGE)}`).setColor(Colors.Blurple) ], components:[row1,row2], flags:EPHEMERAL });
+      return;
+    }
+    if (i.isButton() && ['role_prev','role_next'].includes(i.customId)) {
+      const userId = i.user.id;
+      let page = rolePanelPages[userId] || 0;
+      page += (i.customId==='role_next'?1:-1);
+      rolePanelPages[userId] = page;
+      const startIdx = page * ITEMS_PER_PAGE;
+      const slice = ITEM_ROLES.slice(startIdx, startIdx+ITEMS_PER_PAGE);
+      const menu = new StringSelectMenuBuilder()
+        .setCustomId('select_roles')
+        .setPlaceholder('Choose your roles…')
+        .setMinValues(0)
+        .setMaxValues(slice.length)
+        .addOptions(slice.map(name => {
+          const key = normalizeKey(name.trim());
+          const raw = getEmojiByKey(key);
+          let emoji;
+          if (raw) {
+            const m = raw.match(/^<a?:(\w+):(\d+)>$/);
+            if (m) emoji = { name:m[1], id:m[2], animated:raw.startsWith('<a:') };
+            else emoji = { name:raw };
+          }
+          return { label:name, value:key, emoji };
+        }));
+      const row1 = new ActionRowBuilder().addComponents(menu);
+      const row2 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('role_prev').setLabel('⬅️ Prev').setDisabled(page===0).setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('role_next').setLabel('Next ➡️').setDisabled(startIdx+ITEMS_PER_PAGE>=ITEM_ROLES.length).setStyle(ButtonStyle.Secondary)
+      );
+      await i.update({ embeds:[ new EmbedBuilder().setTitle('🎨 Pick Item Roles').setDescription(`Page ${page+1} of ${Math.ceil(ITEM_ROLES.length/ITEMS_PER_PAGE)}`).setColor(Colors.Blurple) ], components:[row1,row2] });
+      return;
+    }
+    if (i.isStringSelectMenu() && i.customId==='select_roles') {
+      const selected = i.values;
+      const member = i.member;
+      const userId = i.user.id;
+      const page = rolePanelPages[userId] || 0;
+      const slice = ITEM_ROLES.slice(page*ITEMS_PER_PAGE, page*ITEMS_PER_PAGE+ITEMS_PER_PAGE);
+      for (const name of slice) {
+        const key = normalizeKey(name.trim());
+        const roleId = rolesData[i.guild.id]?.[key];
+        if (!roleId) continue;
+        const role = i.guild.roles.cache.get(roleId);
+        if (!role) continue;
+        if (selected.includes(key)) {
+          if (!member.roles.cache.has(roleId)) await member.roles.add(role);
+        } else {
+          if (member.roles.cache.has(roleId)) await member.roles.remove(role);
+        }
+      }
+      await i.reply({ content:`✅ Updated your roles for page ${page+1}.`, flags:EPHEMERAL });
+      return;
+    }
+  } catch(err) {
+    console.error('[interactionHandler]', err);
+    if (i.replied || i.deferred) i.followUp({ content:'💥 Something went wrong.', flags:EPHEMERAL });
+    else i.reply({ content:'💥 Something went wrong.', flags:EPHEMERAL });
+  }
+}
+client.on(Events.InteractionCreate, interactionHandler);
+
+// — Ready & Command Registration —
+client.once(Events.ClientReady, async () => {
+  console.log(`Logged in as ${client.user.tag}`);
+
+  // set a “Watching Grow A Garden” status
+  client.user.setPresence({
+    activities: [{ name: 'Grow A Garden', type: ActivityType.Watching }],
+    status: 'online'
+  });
+
+  await client.application.commands.set([
+    { name:'setup-roles',description:'Create notification + item roles',type:ApplicationCommandType.ChatInput },
+    { name:'guilds',      description:'Show bot/server stats',         type:ApplicationCommandType.ChatInput },
+    {
+      name:'calculate',
+      description:'Calculate fruit prices',
+      type:ApplicationCommandType.ChatInput,
+      options:[
+        { name:'name',    type:3, description:'Fruit name', required:false },
+        { name:'weight',  type:10,description:'Weight',     required:false },
+        { name:'variant', type:3, description:'Variant',    required:false },
+        { name:'mutation',type:3, description:'Mutation',   required:false }
+      ]
+    },
+    { name:'setup-webhook',description:'Interactively set up webhooks',type:ApplicationCommandType.ChatInput,defaultMemberPermissions:PermissionFlagsBits.Administrator }
+  ]);
+
+  // Poll stock/weather every 10s
+  setInterval(() => checkAll().catch(console.error), 10_000);
+
+  // Poll current-event countdown every 1s
+  setInterval(() => checkCurrentEvent().catch(console.error), 1_000);
+
+  // initial run
+  await checkAll();
+  await checkCurrentEvent();
+});
+
+// — Global Errors & Login —
+client.on('error', err => console.error('[Global Error]', err));
+client.on('unhandledRejection', err => console.error('[Unhandled Rejection]', err));
+client.login(DISCORD_BOT_TOKEN).catch(err => console.error('Login failed', err));

@@ -1,0 +1,31 @@
+{
+  "DISCORD_BOT_TOKEN": "MTM5NTcyNTI4ODM4NTU0ODM4MA.GfFsdX.sfRVv0Y6Mizw5QCBI9v7wTBeoMdmWKw4OtJBgQ",
+  "STOCK_API_URL": "https://api.joshlei.com/v2/growagarden/stock/",
+  "WEATHER_API_URL": "https://api.joshlei.com/v2/growagarden/weather/",
+  "CALCULATE_API_URL": "https://api.joshlei.com/v2/growagarden/calculate/",
+  "CURRENT_EVENT_API_URL": "https://api.joshlei.com/v2/growagarden/currentevent",
+  "INFO_API_URL": "https://api.joshlei.com/v2/growagarden/info/",
+  "INVITE_URL": "https://discord.com/oauth2/authorize?client_id=1395725288385548380&permissions=8&integration_type=0&scope=bot+applications.commands",
+  "EMOJI_MAPPING_FILE": "./emoji_mapping.json",
+  "ROLE_CONFIG_FILE": "./role_config.json",
+  "STOCK_CATEGORY_FILE": "./stock_category.json",
+  "COLOR_MAPPING_FILE": "./color_mapping.json",
+  "THUMBNAILS_FILE": "./thumbnails.json",
+  "CATEGORY_ROLE_FILE": "./category_role.json",
+  "ROLE_OP_DELAY": 1.0,
+  "MAX_ROLE_RETRIES": 3,
+  "API_CHECK_DELAY": 300,
+  "BOT_OWNER_ID": "965809871486353430",
+  "WEBHOOK_USERNAMES": {
+    "seed": "Waguri • Seeds Stocks",
+    "gear": "Waguri • Gears Stocks",
+    "cosmetic": "Waguri • Cosmetics",
+    "eventshop": "Waguri • Event Shop",
+    "egg": "Waguri • Egg Stocks",
+    "announcement": "Waguri • Announcer",
+    "weather": "Waguri • Weather Alert",
+    "jandel": "Waguri • Merchant",
+    "currentevent": "Waguri • Event",
+    "default": "Waguri • Stocks"
+  }
+}

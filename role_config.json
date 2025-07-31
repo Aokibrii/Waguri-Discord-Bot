@@ -1,0 +1,30 @@
+{
+  "seed_restock": {
+    "name": "seed restock",
+    "color": { "r": 0, "g": 0, "b": 255 }
+  },
+  "gear_restock": {
+    "name": "gear restock",
+    "color": { "r": 0, "g": 255, "b": 0 }
+  },
+  "cosmetic_restock": {
+    "name": "cosmetic restock",
+    "color": { "r": 255, "g": 0, "b": 255 }
+  },
+  "egg_restock": {
+    "name": "egg restock",
+    "color": { "r": 255, "g": 255, "b": 0 }
+  },
+  "event_restock": {
+    "name": "event restock",
+    "color": { "r": 255, "g": 165, "b": 0 }
+  },
+  "weather_change": {
+    "name": "weather change",
+    "color": { "r": 135, "g": 206, "b": 235 }
+  },
+  "jandel_message": {
+    "name": "jandel message",
+    "color": { "r": 255, "g": 0, "b": 0 }
+  }
+}
